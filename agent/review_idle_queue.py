@@ -97,12 +97,12 @@ class ReviewIdleQueue:
     def enqueue(self, agent: Any, session_key: str, kwargs: dict[str, Any]) -> None:
         """Add (or replace — newest snapshot wins) a session's pending review, keeping the ORIGINAL
         enqueue time on coalesce so a busy session cannot push its age-out forever."""
-        from agent.background_review import _optional_lock
+        from agent.background_review import holding_review_fence
 
         # Parent -> queue lock order; retirement fences insertion before purging. The
         # dispatcher never takes a parent lock while holding the queue lock.
-        with _optional_lock(agent, "_background_review_lock"):
-            if getattr(agent, "_background_review_retired", False) is True:
+        with holding_review_fence(agent) as retired:
+            if retired:
                 return
             with self._lock:
                 existing = self._pending.get(session_key)

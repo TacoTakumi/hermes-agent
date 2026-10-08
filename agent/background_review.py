@@ -80,7 +80,7 @@ def prepare_background_review_run(agent: Any) -> Optional[_BackgroundReviewRun]:
         if lock is None:
             lock = agent._background_review_lock = threading.Lock()
         with lock:
-            if getattr(agent, "_background_review_retired", False) is True:
+            if _is_retired(agent):
                 return None
             current = getattr(agent, "_background_review_run", None)
             if current is not None and not current.request_done.is_set():
@@ -91,10 +91,23 @@ def prepare_background_review_run(agent: Any) -> Optional[_BackgroundReviewRun]:
     return run
 
 
+def _is_retired(agent: Any) -> bool:
+    """Read the retirement flag; the caller holds ``_background_review_lock`` when one exists."""
+    return getattr(agent, "_background_review_retired", False) is True
+
+
+@contextmanager
+def holding_review_fence(agent: Any) -> Iterator[bool]:
+    """Hold the parent's review lock and yield whether this instance is retired. Work admitted
+    inside the block cannot interleave with ``retire_background_reviews`` setting the fence."""
+    with _optional_lock(agent, "_background_review_lock"):
+        yield _is_retired(agent)
+
+
 def background_review_retired(agent: Any) -> bool:
     """Whether this parent instance was permanently discarded (not just preempted)."""
-    with _optional_lock(agent, "_background_review_lock"):
-        return getattr(agent, "_background_review_retired", False) is True
+    with holding_review_fence(agent) as retired:
+        return retired
 
 
 def retire_background_reviews(agent: Any, *, message: str, tool_reason: str) -> None:
@@ -1243,9 +1256,8 @@ def _run_review_fork(
 
         _reset_background_review_read_marks()
     try:
-        with _optional_lock(agent, "_background_review_lock"):
-            admitted = getattr(agent, "_background_review_retired", False) is not True and (
-                review_run is None or review_run.begin_request(st.review_agent))
+        with holding_review_fence(agent) as retired:
+            admitted = not retired and (review_run is None or review_run.begin_request(st.review_agent))
         if admitted:
             # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
             st.review_agent.run_conversation(
