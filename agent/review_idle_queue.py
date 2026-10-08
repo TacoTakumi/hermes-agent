@@ -102,14 +102,14 @@ class ReviewIdleQueue:
                 dispatch: Optional[Callable[[], None]] = None) -> None:
         """Add (or replace — newest snapshot wins) a session's pending review, keeping the ORIGINAL
         enqueue time on coalesce so a busy session cannot push its age-out forever."""
-        from agent.background_review import _optional_lock
+        from agent.background_review import holding_review_fence
 
         # Parent -> queue lock order; retirement fences insertion before purging. The
         # dispatcher never takes a parent lock while holding the queue lock. An item with
         # its own dispatch is fenced by its owner and skips the parent lock.
-        fence = _optional_lock(agent, "_background_review_lock") if dispatch is None else contextlib.nullcontext()
-        with fence:
-            if dispatch is None and getattr(agent, "_background_review_retired", False) is True:
+        fence = holding_review_fence(agent) if dispatch is None else contextlib.nullcontext(False)
+        with fence as retired:
+            if retired:
                 return
             with self._lock:
                 existing = self._pending.get(session_key)

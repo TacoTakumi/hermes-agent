@@ -8,6 +8,7 @@ import pytest
 
 from agent import background_review, review_idle_queue
 from gateway.run_agent_cache import GatewayAgentCacheMixin
+import run_agent
 from run_agent import AIAgent
 
 
@@ -63,7 +64,13 @@ def reviews(monkeypatch):
         def release_clients(self):
             pass
 
-    monkeypatch.setattr(threading, "Thread", ManualThread)
+    # Only the review worker spawned by run_agent is scheduled manually; every other
+    # thread (cancel interrupts, idle-queue internals) stays a real thread.
+    monkeypatch.setattr(
+        run_agent,
+        "threading",
+        SimpleNamespace(**{**vars(threading), "Thread": ManualThread}),
+    )
     monkeypatch.setattr(
         background_review,
         "build_cache_parity_fork",
