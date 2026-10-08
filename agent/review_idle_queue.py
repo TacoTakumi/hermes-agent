@@ -12,6 +12,7 @@ fork. Idle truth is the supervisor's /slots held for a settle window.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import logging
@@ -101,11 +102,20 @@ class ReviewIdleQueue:
                 dispatch: Optional[Callable[[], None]] = None) -> None:
         """Add (or replace — newest snapshot wins) a session's pending review, keeping the ORIGINAL
         enqueue time on coalesce so a busy session cannot push its age-out forever."""
-        with self._lock:
-            existing = self._pending.get(session_key)
-            enqueued_at = existing.enqueued_at if existing is not None else self._now()
-            self._pending[session_key] = _PendingReview(
-                agent, session_key, kwargs, enqueued_at, contextvars.copy_context(), dispatch)
+        from agent.background_review import _optional_lock
+
+        # Parent -> queue lock order; retirement fences insertion before purging. The
+        # dispatcher never takes a parent lock while holding the queue lock. An item with
+        # its own dispatch is fenced by its owner and skips the parent lock.
+        fence = _optional_lock(agent, "_background_review_lock") if dispatch is None else contextlib.nullcontext()
+        with fence:
+            if dispatch is None and getattr(agent, "_background_review_retired", False) is True:
+                return
+            with self._lock:
+                existing = self._pending.get(session_key)
+                enqueued_at = existing.enqueued_at if existing is not None else self._now()
+                self._pending[session_key] = _PendingReview(
+                    agent, session_key, kwargs, enqueued_at, contextvars.copy_context(), dispatch)
         self._ensure_thread()
         self._wake.set()
         logger.info("Background review deferred (session=%s, queued=%d)", session_key[-12:], len(self._pending))
@@ -121,6 +131,14 @@ class ReviewIdleQueue:
             item = self._pending.get(session_key)
             if item is not None and item.dispatch is dispatch:
                 del self._pending[session_key]
+
+    def discard_parent(self, agent: Any) -> None:
+        """Remove only this instance's reviews, never a successor sharing its session key.
+        An item with its own dispatch stays: its owner fences and discards it."""
+        with self._lock:
+            keys = [key for key, item in self._pending.items() if item.agent is agent and item.dispatch is None]
+            for key in keys:
+                del self._pending[key]
 
     def _ensure_thread(self) -> None:
         with self._lock:
@@ -180,6 +198,12 @@ class ReviewIdleQueue:
     def _dispatch(self, item: _PendingReview) -> None:
         if item.dispatch is not None:
             item.dispatch()
+            return
+        from agent.background_review import background_review_retired
+
+        # A popped item is no longer purgeable. Preparation/admission also check the
+        # fence in case retirement races this check or the enabled/config re-read.
+        if background_review_retired(item.agent):
             return
         if not self._still_enabled(item):
             logger.info(
