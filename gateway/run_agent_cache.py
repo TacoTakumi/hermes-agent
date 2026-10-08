@@ -957,6 +957,12 @@ class GatewayAgentCacheMixin:
         resume, so terminal sandbox, browser daemon and bg processes outlive the AIAgent instance."""
         if agent is None:
             return
+        from agent.background_review import retire_background_reviews
+
+        # A rebuilt agent cannot preempt the discarded parent's review or its deferred requeues.
+        retire_background_reviews(
+            agent, message="agent cache evicted", tool_reason="background review cache evicted",
+        )
         with suppress(Exception):
             if hasattr(agent, "release_clients"):
                 agent.release_clients()
