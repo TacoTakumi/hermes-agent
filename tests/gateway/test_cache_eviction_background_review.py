@@ -73,6 +73,29 @@ def test_soft_eviction_cancels_review_before_detaching_child_clients(monkeypatch
     assert not worker.is_alive()
 
 
+def test_soft_eviction_still_releases_when_review_retirement_fails(monkeypatch):
+    from agent import review_idle_queue
+
+    def broken_purge(agent):
+        raise RuntimeError("queue purge failed")
+
+    monkeypatch.setattr(review_idle_queue.QUEUE, "discard_parent", broken_purge)
+    released = []
+    parent = SimpleNamespace(
+        _background_review_lock=threading.Lock(),
+        _background_review_run=None,
+        _background_review_agent=None,
+        _session_messages=[{"role": "user", "content": "large transcript"}],
+        _db_flush_scan_prefix=[{"role": "user", "content": "large transcript"}],
+        release_clients=lambda: released.append(True),
+    )
+    runner = object.__new__(GatewayAgentCacheMixin)
+    runner._release_evicted_agent_soft(parent)
+    assert released == [True], "A retirement failure must not skip client release"
+    assert parent._session_messages == []
+    assert parent._db_flush_scan_prefix is None
+
+
 def test_soft_eviction_fences_a_review_not_yet_started(monkeypatch):
     from agent import background_review
 
