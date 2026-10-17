@@ -117,6 +117,26 @@ async def test_run_sse_carries_controls_tool_payloads_and_authoritative_cancella
     assert 'run.cancelled' in names and 'run.completed' not in names
 
 
+@pytest.mark.asyncio
+async def test_run_sse_tool_completed_carries_the_tool_result(api, owner):
+    import json
+    admitted = admit_api_turn(api, session_id='sse-result', user_message='hello', conversation_history=[])
+    _, ref, _row = admitted
+    launch, queue = _launch(api, admitted)
+
+    async def handle(event):
+        turn = _turn_runner(owner, ref)
+        turn.combined_tool_start_callback('call-1', 'read_file', {'path': '/tmp/x'})
+        turn.combined_tool_complete_callback('call-1', 'read_file', {'path': '/tmp/x'}, {'content': 'body'})
+        return 'done'
+    owner.runner._handle_message = handle
+    await _execute_run(api, launch, _api_server=_api_server)
+    await asyncio.sleep(0)  # call_soon_threadsafe projections land on the loop
+    completed = next(e for e in _events(queue) if e['event'] == 'tool.completed')
+    assert json.loads(completed['result']) == {'content': 'body'}
+    assert 'body' in completed['preview']
+
+
 def _wrap(api, run_id, loop, sink):
     from gateway.platforms.api_server_runs import _make_run_event_callback
     inner = _make_run_event_callback(api, run_id, loop, _api_server=_api_server)
