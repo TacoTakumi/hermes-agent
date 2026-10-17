@@ -137,6 +137,27 @@ async def test_run_sse_tool_completed_carries_the_tool_result(api, owner):
     assert 'body' in completed['preview']
 
 
+@pytest.mark.asyncio
+async def test_run_completed_reports_the_served_runtime_without_a_model_lock(api, owner):
+    admitted = admit_api_turn(api, session_id='sse-runtime', user_message='hello', conversation_history=[])
+    launch, queue = _launch(api, admitted)
+
+    async def handle(event):
+        from gateway.run_turn_runner import _settle_api_runtime_lock
+        from gateway.session_results import execution_result
+        captured = execution_result.get()
+        captured['usage'] = {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}
+        captured['result'] = result = {'final_response': 'done', 'completed': True}
+        _settle_api_runtime_lock(SimpleNamespace(provider='custom', model='served-model'), result, captured)
+        return 'done'
+    owner.runner._handle_message = handle
+    await _execute_run(api, launch, _api_server=_api_server)
+    await asyncio.sleep(0)  # call_soon_threadsafe projections land on the loop
+    completed = next(e for e in _events(queue) if e['event'] == 'run.completed')
+    runtime = completed['runtime']
+    assert (runtime['provider'], runtime['model'], runtime['route_source']) == ('custom', 'served-model', 'global')
+
+
 def _wrap(api, run_id, loop, sink):
     from gateway.platforms.api_server_runs import _make_run_event_callback
     inner = _make_run_event_callback(api, run_id, loop, _api_server=_api_server)
