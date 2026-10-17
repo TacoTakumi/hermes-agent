@@ -87,6 +87,7 @@ async def test_admitted_run_tool_completed_carries_result(api, owner):
         from gateway.session_results import execution_result
         turn = _turn_runner(owner, ref)
         turn.combined_tool_start_callback("call-1", "read_file", {"path": "/tmp/x"})
+        await asyncio.sleep(0.02)  # health: allow HX013 -- the delay is the tool duration under test
         turn.combined_tool_complete_callback("call-1", "read_file", {"path": "/tmp/x"}, {"content": "body"})
         execution_result.get()["result"] = {"final_response": "ok"}
         return "ok"
@@ -97,3 +98,4 @@ async def test_admitted_run_tool_completed_carries_result(api, owner):
 
     assert json.loads(completed["result"]) == {"content": "body"}
     assert "body" in completed["preview"]
+    assert completed["duration"] >= 0.02
