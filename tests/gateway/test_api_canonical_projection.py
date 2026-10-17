@@ -127,6 +127,7 @@ async def test_run_sse_tool_completed_carries_the_tool_result(api, owner):
     async def handle(event):
         turn = _turn_runner(owner, ref)
         turn.combined_tool_start_callback('call-1', 'read_file', {'path': '/tmp/x'})
+        await asyncio.sleep(0.02)  # health: allow HX013 -- the delay is the tool duration under test
         turn.combined_tool_complete_callback('call-1', 'read_file', {'path': '/tmp/x'}, {'content': 'body'})
         return 'done'
     owner.runner._handle_message = handle
@@ -135,6 +136,7 @@ async def test_run_sse_tool_completed_carries_the_tool_result(api, owner):
     completed = next(e for e in _events(queue) if e['event'] == 'tool.completed')
     assert json.loads(completed['result']) == {'content': 'body'}
     assert 'body' in completed['preview']
+    assert completed['duration'] >= 0.02
 
 
 @pytest.mark.asyncio
