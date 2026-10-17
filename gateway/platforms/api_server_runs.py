@@ -1101,9 +1101,12 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                     run.admission, stream_delta_callback=_text_cb,
                     tool_start_callback=_tool_start, tool_complete_callback=_tool_complete)
             # The canonical turn has no agent object here; the served pair rides on the
-            # committed usage/result runtime metadata when the turn recorded one.
-            served_runtime = ((usage or {}).get("runtime") if isinstance(usage, dict) else None) or (
+            # committed usage/result runtime metadata the turn recorded. Only the pair is kept
+            # (the in-process path's _served_runtime shape): route_source and requested come
+            # from this run's own request below.
+            recorded = ((usage or {}).get("runtime") if isinstance(usage, dict) else None) or (
                 result.get("runtime") if isinstance(result, dict) else None) or {}
+            served_runtime = {key: recorded.get(key, "") for key in ("provider", "model")}
         else:
             with self._profile_scope(run.request_profile):
                 agent = self._create_agent(
