@@ -84,3 +84,24 @@ def test_locked_turn_served_by_another_runtime_settles_failed(api):
         api_execution.reset(token)
     assert result['failed'] is True and result['completed'] is False and result['final_response'] == ''
     assert 'confirmed model lock runtime mismatch' in result['error']
+
+
+def test_unlocked_turn_records_its_served_runtime(api):
+    """An API turn without a model lock still records the provider and model that served it, and
+    a runtime that differs from the requested route never fails it."""
+    from types import SimpleNamespace
+    from gateway.run_turn_runner import _settle_api_runtime_lock
+    from gateway.session_api_turn import api_execution
+
+    agent = SimpleNamespace(provider='custom', model='backup-model')
+    result, captured = {'final_response': 'BACKUP_OK', 'completed': True}, {'usage': {}}
+    token = api_execution.set({'adapter': api, 'settings': {
+        'route': {'provider': 'custom', 'model': 'primary-model'}}})
+    try:
+        _settle_api_runtime_lock(agent, result, captured)
+    finally:
+        api_execution.reset(token)
+    assert result == {'final_response': 'BACKUP_OK', 'completed': True}
+    runtime = captured['usage']['runtime']
+    assert (runtime['provider'], runtime['model']) == ('custom', 'backup-model')
+    assert 'model_lock' not in runtime
