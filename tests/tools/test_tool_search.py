@@ -91,6 +91,91 @@ class TestClassification:
                 f"Core tool '{core_name}' must NEVER be deferrable"
             )
 
+    def test_eager_toolset_stays_in_the_model_facing_array(self, monkeypatch):
+        """An operator can keep one MCP server eager while the rest defer."""
+        from tools import tool_search
+
+        monkeypatch.setattr(
+            tool_search, "_registry_toolset",
+            lambda name: "mcp-team" if name == "team_list" else "mcp-parcel")
+        assert tool_search.is_deferrable_tool_name(
+            "team_list", eager_toolsets=frozenset({"mcp-team"})) is False
+        assert tool_search.is_deferrable_tool_name("team_list") is True
+        assert tool_search.is_deferrable_tool_name(
+            "lookup", eager_toolsets=frozenset({"mcp-team"})) is True
+
+    def test_eager_toolsets_parsing_ignores_missing_and_non_list_values(self):
+        from tools.tool_search import ToolSearchConfig
+        assert ToolSearchConfig.from_raw({}).eager_toolsets == frozenset()
+        assert ToolSearchConfig.from_raw({"eager_toolsets": None}).eager_toolsets == frozenset()
+        assert ToolSearchConfig.from_raw({"eager_toolsets": "device_tools"}).eager_toolsets == frozenset()
+        assert ToolSearchConfig.from_raw(
+            {"eager_toolsets": [" device_tools ", ""]}).eager_toolsets == {"device_tools"}
+
+    def test_defer_name_wins_over_eager_toolset(self, monkeypatch):
+        """A name in ``defer`` is more specific than its toolset, so it still defers."""
+        from tools import tool_search
+        monkeypatch.setattr(tool_search, "_registry_toolset", lambda name: "device_tools")
+        assert tool_search.is_deferrable_tool_name(
+            "launch_app", frozenset({"launch_app"}), frozenset({"device_tools"})) is True
+
+    def test_eager_plugin_toolset_is_sent_whole_and_left_out_of_the_listing(self, monkeypatch):
+        """Every tool of an eager toolset, also one registered later, keeps its full schema;
+        another plugin toolset still defers."""
+        from tools import tool_search
+        from tools.tool_search import BRIDGE_TOOL_NAMES, ToolSearchConfig, assemble_tool_defs
+        toolsets = {"list_apps": "device_tools", "launch_app": "device_tools",
+                    "close_app": "device_tools", "weather_probe": "other_plugin"}
+        monkeypatch.setattr(tool_search, "_registry_toolset", toolsets.get)
+        defs = [_td(name, f"{name} tool") for name in toolsets]
+        result = assemble_tool_defs(
+            defs, context_length=200_000,
+            config=ToolSearchConfig.from_raw({"enabled": "on", "eager_toolsets": ["device_tools"]}))
+        by_name = {td["function"]["name"]: td for td in result.tool_defs}
+        assert result.activated and result.deferred_count == 1
+        assert BRIDGE_TOOL_NAMES <= by_name.keys()
+        for name in ("list_apps", "launch_app", "close_app"):
+            assert by_name[name] == _td(name, f"{name} tool")
+        assert "weather_probe" not in by_name
+        listing = by_name["tool_search"]["function"]["description"]
+        assert "weather_probe" in listing and "launch_app" not in listing
+
+    def test_empty_eager_toolsets_keeps_plugin_deferral(self, monkeypatch):
+        from tools import tool_search
+        from tools.tool_search import ToolSearchConfig, assemble_tool_defs
+        monkeypatch.setattr(tool_search, "_registry_toolset", lambda name: "device_tools")
+        for raw in ({"enabled": "on"}, {"enabled": "on", "eager_toolsets": []}):
+            result = assemble_tool_defs([_td("launch_app", "Launch")], context_length=200_000,
+                                        config=ToolSearchConfig.from_raw(raw))
+            assert result.activated and result.deferred_count == 1
+
+    def test_all_eager_leaves_the_bridge_off(self, monkeypatch, caplog):
+        import logging
+        from tools import tool_search
+        from tools.tool_search import ToolSearchConfig, assemble_tool_defs
+        monkeypatch.setattr(tool_search, "_registry_toolset", lambda name: "device_tools")
+        with caplog.at_level(logging.DEBUG, logger=tool_search.logger.name):
+            result = assemble_tool_defs(
+                [_td("terminal", "Run shell"), _td("launch_app", "Launch")], context_length=200_000,
+                config=ToolSearchConfig.from_raw({"enabled": "on", "eager_toolsets": ["device_tools"]}))
+        assert not result.activated
+        assert [td["function"]["name"] for td in result.tool_defs] == ["terminal", "launch_app"]
+        assert "all in eager_toolsets" in caplog.text
+
+    def test_config_yaml_edit_changes_eager_toolsets(self, tmp_path):
+        """The config loader re-reads an edited config.yaml, like the tool-definition memo key."""
+        from unittest.mock import patch
+        from tests.waiting import wait_for_ctime_tick
+        from tools.tool_search import load_config
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("tools:\n  tool_search:\n    enabled: on\n", encoding="utf-8")
+        with patch("hermes_cli.config.get_config_path", return_value=cfg):
+            assert load_config().eager_toolsets == frozenset()
+            wait_for_ctime_tick(tmp_path, cfg.stat().st_ctime_ns)
+            cfg.write_text("tools:\n  tool_search:\n    eager_toolsets: [device_tools]\n",
+                           encoding="utf-8")
+            assert load_config().eager_toolsets == {"device_tools"}
+
     def test_bridge_tools_never_defer(self):
         from tools.tool_search import is_deferrable_tool_name, BRIDGE_TOOL_NAMES
         for name in BRIDGE_TOOL_NAMES:
