@@ -2008,9 +2008,9 @@ DEFAULT_CONFIG = {
             # then bare tier-2 bridge); "on" = same rendering, explicit intent; "off" = always the
             # bare bridge.
             "listing": "auto",
-            # Absolute cap on the embedded listing in tokens (chars/4), regardless of context size.
-            # Range 200..60000.
+            # Absolute cap on the embedded listing in tokens (chars/4) regardless of context, 200..60000.
             "listing_max_tokens": 4000,
+            "eager_toolsets": [],  # toolsets that never defer (e.g. mcp-team); a ``defer`` name still does
             # Tools replaced by the bridge by default. This list intentionally includes cold,
             # event-triggered built-ins; an explicit list replaces it wholesale and [] keeps every
             # tool eager. The runtime fallback in tools/tool_search.py derives from this value.
