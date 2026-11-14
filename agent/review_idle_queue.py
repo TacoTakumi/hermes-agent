@@ -126,10 +126,11 @@ def _mark(block: dict[str, Any]) -> Optional[int]:
 
 def _provider_max_in_flight(provider_id: Optional[str], base_url: str) -> Optional[int]:
     """``max_in_flight_requests`` for the review runtime's endpoint. The entry named by
-    ``provider_id`` decides when there is one; otherwise the first marked entry on the same host and
-    port, then the first marked entry on the same host. An unmarked entry never hides a marked one.
-    ``None`` when nothing is marked or the config is unreadable: unlimited is the fail-open default,
-    so only an explicit ``1`` ever newly defers anyone."""
+    ``provider_id`` decides when there is one. Otherwise the entries on the same host and port
+    decide: the first marked one, or None when none of them is marked, since the endpoint's own entry
+    says it has no mark. Only when no entry names the host and port does the first marked entry on
+    the same host apply. ``None`` when nothing is marked or the config is unreadable: unlimited is
+    the fail-open default, so only an explicit ``1`` ever newly defers anyone."""
     try:
         from hermes_cli.config import load_config_readonly
 
@@ -144,17 +145,19 @@ def _provider_max_in_flight(provider_id: Optional[str], base_url: str) -> Option
     host, port = _host_port(base_url)
     if not host:
         return None
-    same_host = []
+    exact: list[Optional[int]] = []
+    same_host: list[int] = []
     for _pid, block in entries:
-        mark = _mark(block)
-        if mark is None:
-            continue
         entry_host, entry_port = _host_port(_entry_url(block))
         if entry_host != host:
             continue
+        mark = _mark(block)
         if entry_port == port:
-            return mark
-        same_host.append(mark)
+            exact.append(mark)
+        elif mark is not None:
+            same_host.append(mark)
+    if exact:
+        return next((mark for mark in exact if mark is not None), None)
     return same_host[0] if same_host else None
 
 
