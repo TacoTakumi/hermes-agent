@@ -59,6 +59,73 @@ def review_targets_managed_local(agent: Any, task_cfg: Optional[dict[str, Any]])
         return False
 
 
+def _provider_entries(config: Any) -> list[tuple[str, dict[str, Any]]]:
+    """``(provider id, entry)`` for every ``providers.<id>`` block and every legacy
+    ``custom_providers`` list item (id ``custom:<name>``); malformed sections are skipped."""
+    entries: list[tuple[str, dict[str, Any]]] = []
+    if not isinstance(config, dict):
+        return entries
+    providers = config.get("providers")
+    if isinstance(providers, dict):
+        entries += [(str(pid), block) for pid, block in providers.items() if isinstance(block, dict)]
+    custom = config.get("custom_providers")
+    if isinstance(custom, list):
+        entries += [(f"custom:{item.get('name')}", item) for item in custom
+                    if isinstance(item, dict) and item.get("name")]
+    return entries
+
+
+def _provider_max_in_flight(provider_id: Optional[str], want_hostname: str) -> Optional[int]:
+    """``max_in_flight_requests`` of the provider entry matching ``provider_id`` or, failing that,
+    the review runtime's base-URL hostname. ``None`` when unset or unreadable: unlimited is the
+    fail-open default, so only an explicit ``1`` ever newly defers anyone."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        config = load_config_readonly()
+    except Exception:  # health: allow BLE001 -- an unreadable config reads as unmarked: spawn now, the old default
+        return None
+    from utils import base_url_hostname
+
+    for pid, block in _provider_entries(config):
+        if not (provider_id and pid == provider_id):
+            try:
+                host = base_url_hostname(str(block.get("base_url") or ""))
+            except ValueError:  # a malformed URL (e.g. an unclosed IPv6 bracket) matches no host
+                continue
+            if not (want_hostname and host == want_hostname):
+                continue
+        try:
+            value = int(block.get("max_in_flight_requests"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+    return None
+
+
+def review_targets_single_stream(agent: Any, task_cfg: Optional[dict[str, Any]]) -> bool:
+    """True when the review fork would decode on an endpoint the operator marked single-stream
+    (``max_in_flight_requests: 1`` on its ``providers`` or ``custom_providers`` entry).
+
+    Companion to :func:`review_targets_managed_local` for serves the supervisor does not manage,
+    on this machine or another one on the network: an immediately spawned review contends with the
+    next live turn for the only slot, loses via hard interrupt, and costs a full re-prefill per kill.
+    A review replays the whole conversation, so deferring it to the idle queue loses nothing. The mark
+    is the operator's statement that the endpoint does not queue requests itself, so it applies on
+    any host. Any failure reads False (immediate spawn is the pre-existing default)."""
+    try:
+        from agent.background_review import _resolve_review_runtime
+        from utils import base_url_hostname
+
+        runtime = _resolve_review_runtime(agent, task_cfg)
+        hostname = base_url_hostname(runtime.get("base_url") or "")
+        if not hostname:
+            return False
+        return _provider_max_in_flight(runtime.get("provider"), hostname) == 1
+    except Exception:  # health: allow BLE001 -- runs on the turn's tail; any failure spawns now, the old default
+        return False
+
+
 @dataclass(slots=True)
 class _PendingReview:
     agent: Any

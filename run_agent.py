@@ -170,9 +170,14 @@ def _positive_int(value: Any) -> Optional[int]:
 
 
 def _review_should_defer(agent: Any, task_cfg: Optional[dict[str, Any]]) -> bool:
-    """True when an automatic background review targets the managed local runtime under ``defer: auto``."""
-    from agent.review_idle_queue import defer_mode, review_targets_managed_local
-    return defer_mode(task_cfg) == "auto" and review_targets_managed_local(agent, task_cfg)
+    """True when an automatic background review should wait for machine idle under ``defer: auto``:
+    it targets the managed local runtime, or an endpoint the operator marked single-stream
+    (``max_in_flight_requests: 1``), where it would contend with the next live turn and lose."""
+    from agent.review_idle_queue import defer_mode, review_targets_managed_local, review_targets_single_stream
+
+    if defer_mode(task_cfg) != "auto":
+        return False
+    return review_targets_managed_local(agent, task_cfg) or review_targets_single_stream(agent, task_cfg)
 
 
 def _review_queue_key(agent: Any) -> str:
