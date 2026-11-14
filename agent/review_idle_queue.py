@@ -87,32 +87,75 @@ def _provider_entries(config: Any) -> list[tuple[str, dict[str, Any]]]:
     return entries
 
 
-def _provider_max_in_flight(provider_id: Optional[str], want_hostname: str) -> Optional[int]:
-    """``max_in_flight_requests`` of the provider entry matching ``provider_id`` or, failing that,
-    the review runtime's base-URL hostname. ``None`` when unset or unreadable: unlimited is the
-    fail-open default, so only an explicit ``1`` ever newly defers anyone."""
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _host_port(url: Any) -> tuple[str, Optional[int]]:
+    """Lowercased hostname and port (the scheme's default when absent) of ``url``; ``("", None)``
+    for a missing or malformed URL (e.g. an unclosed IPv6 bracket, a non-numeric port)."""
+    from urllib.parse import urlsplit
+
+    if not (isinstance(url, str) and url.strip()):
+        return "", None
+    raw = url.strip()
+    try:
+        parts = urlsplit(raw if "//" in raw else "//" + raw)
+        host, port = (parts.hostname or "").lower(), parts.port
+    except ValueError:
+        return "", None
+    return host, port if port is not None else _DEFAULT_PORTS.get(parts.scheme)
+
+
+def _entry_url(block: dict[str, Any]) -> str:
+    """The entry's endpoint URL: ``base_url``, else ``url``, else ``api``, as Hermes writes them."""
+    for key in ("base_url", "url", "api"):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _mark(block: dict[str, Any]) -> Optional[int]:
+    """The entry's positive ``max_in_flight_requests``, else None."""
+    try:
+        value = int(block.get("max_in_flight_requests"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _provider_max_in_flight(provider_id: Optional[str], base_url: str) -> Optional[int]:
+    """``max_in_flight_requests`` for the review runtime's endpoint. The entry named by
+    ``provider_id`` decides when there is one; otherwise the first marked entry on the same host and
+    port, then the first marked entry on the same host. An unmarked entry never hides a marked one.
+    ``None`` when nothing is marked or the config is unreadable: unlimited is the fail-open default,
+    so only an explicit ``1`` ever newly defers anyone."""
     try:
         from hermes_cli.config import load_config_readonly
 
         config = load_config_readonly()
     except Exception:  # health: allow BLE001 -- an unreadable config reads as unmarked: spawn now, the old default
         return None
-    from utils import base_url_hostname
-
-    for pid, block in _provider_entries(config):
-        if not (provider_id and pid == provider_id):
-            try:
-                host = base_url_hostname(str(block.get("base_url") or ""))
-            except ValueError:  # a malformed URL (e.g. an unclosed IPv6 bracket) matches no host
-                continue
-            if not (want_hostname and host == want_hostname):
-                continue
-        try:
-            value = int(block.get("max_in_flight_requests"))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
-        return value if value > 0 else None
-    return None
+    entries = _provider_entries(config)
+    if provider_id:
+        named = [block for pid, block in entries if pid == provider_id]
+        if named:
+            return _mark(named[0])
+    host, port = _host_port(base_url)
+    if not host:
+        return None
+    same_host = []
+    for _pid, block in entries:
+        mark = _mark(block)
+        if mark is None:
+            continue
+        entry_host, entry_port = _host_port(_entry_url(block))
+        if entry_host != host:
+            continue
+        if entry_port == port:
+            return mark
+        same_host.append(mark)
+    return same_host[0] if same_host else None
 
 
 def review_targets_single_stream(agent: Any, task_cfg: Optional[dict[str, Any]]) -> bool:
@@ -127,13 +170,12 @@ def review_targets_single_stream(agent: Any, task_cfg: Optional[dict[str, Any]])
     any host. Any failure reads False (immediate spawn is the pre-existing default)."""
     try:
         from agent.background_review import _resolve_review_runtime
-        from utils import base_url_hostname
 
         runtime = _resolve_review_runtime(agent, task_cfg)
-        hostname = base_url_hostname(runtime.get("base_url") or "")
-        if not hostname:
+        base_url = runtime.get("base_url") or ""
+        if not _host_port(base_url)[0]:
             return False
-        return _provider_max_in_flight(runtime.get("provider"), hostname) == 1
+        return _provider_max_in_flight(runtime.get("provider"), base_url) == 1
     except Exception:  # health: allow BLE001 -- runs on the turn's tail; any failure spawns now, the old default
         return False
 
