@@ -26,7 +26,7 @@ def reviews(monkeypatch):
         lambda: (True, {"defer": "auto", "defer_max_age_s": 1}),
     )
     monkeypatch.setattr(
-        "agent.auxiliary_client._managed_local_netloc", lambda: "127.0.0.1:9999"
+        "agent.auxiliary_managed_local._managed_local_netloc", lambda: "127.0.0.1:9999"
     )
     monkeypatch.setattr(
         background_review,
