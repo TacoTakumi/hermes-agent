@@ -38,6 +38,9 @@ class GatewaySessionAgentMixin:
         agent: Any = None
         reused: bool = False
         evicted: Any = None  # agent evicted under the lock; released off-lock on a daemon thread
+        # Cached agent whose config signature no longer matches. It stays alive (it may still be
+        # finishing a turn); only its background reviews are retired, once the new agent is cached.
+        replaced: Any = None
 
     def _skip_context_files(self, platform_key) -> bool:
         """gateway.platforms.<plat>.skip_context_files: messaging platforms may opt out of
@@ -101,7 +104,12 @@ class GatewaySessionAgentMixin:
             return out
         with cache_lock:
             cached = cache.get(ctx.session_key)
-            if not (cached and cached[1] == sig):
+            if not cached:
+                return out
+            if cached[1] != sig:
+                from gateway.run import _AGENT_PENDING_SENTINEL
+                if cached[0] is not None and cached[0] is not _AGENT_PENDING_SENTINEL:
+                    out.replaced = cached[0]
                 return out
             # cached[2] = message_count at cache time (stale when a second process appended rows);
             # cached[3] = the session_id the snapshot was taken for.
@@ -146,6 +154,30 @@ class GatewaySessionAgentMixin:
         self._runner._spawn_release_thread(
             self._runner._release_evicted_agent_soft, (agent,), f"agent-xproc-evict-{str(self._ctx.session_key)[:24]}",
             inline_fallback=True,
+        )
+
+    def _retire_replaced_agent_reviews(self, agent) -> None:
+        """Retire the background reviews of an agent a config change replaced. Cancellation is per
+        instance, so a live turn on the new agent cannot reach a review the old one still runs; it
+        would decode beside every later turn of the session. Off-lock on a daemon thread: the cancel
+        waits a bounded time for the fork to acknowledge."""
+        from agent.background_review import retire_background_reviews
+        session_key = str(self._ctx.session_key)
+        if getattr(agent, "_background_review_run", None) is not None:
+            logger.info("Retiring the background review of the agent replaced for session %s", session_key)
+
+        def _retire(replaced) -> None:
+            try:
+                retire_background_reviews(
+                    replaced, message="agent replaced after a config change",
+                    tool_reason="background review agent replaced",
+                )
+            except Exception:
+                logger.warning("Could not retire the replaced agent's background review", exc_info=True)
+
+        self._runner._spawn_release_thread(
+            _retire, (agent,), f"agent-replace-retire-{session_key[:24]}",
+            inline_fallback=True, session_key=session_key,
         )
 
     def _build_fresh_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations,
@@ -238,5 +270,7 @@ class GatewaySessionAgentMixin:
                     # can skip the meaningless count comparison if the active session_id switches.
                     cache[ctx.session_key] = (agent, sig, msg_count, ctx.session_id)
                     runner._enforce_agent_cache_cap()
+            if found.replaced is not None and found.replaced is not agent:
+                self._retire_replaced_agent_reviews(found.replaced)
             logger.debug("Created new agent for session %s (sig=%s)", ctx.session_key, sig)
         return agent, found.reused
