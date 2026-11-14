@@ -132,3 +132,41 @@ def test_defer_never_respected():
     config = _cfg({"qwen27b-exl3": {"base_url": "http://127.0.0.1:8290/v1", "max_in_flight_requests": 1}})
     with patch("hermes_cli.config.load_config_readonly", return_value=config):
         assert _review_should_defer(_FakeAgent(), {"defer": "never"}) is False
+
+
+def test_unmarked_entry_on_the_same_host_does_not_hide_a_marked_one():
+    agent = _FakeAgent(provider="custom", base_url="http://192.0.2.10:8080/v1")
+    config = _cfg({"stt": {"base_url": "http://192.0.2.10:9000/v1"}},
+                  [{"name": "llamacpp", "base_url": "http://192.0.2.10:8080/v1", "max_in_flight_requests": 1}])
+    assert _defers(agent, config) is True
+
+
+def test_marked_entry_found_whatever_the_order():
+    agent = _FakeAgent(provider="custom", base_url="http://192.0.2.10:8080/v1")
+    config = _cfg({"rig": {"base_url": "http://192.0.2.10:8080/v1", "max_in_flight_requests": 1}},
+                  [{"name": "stt", "base_url": "http://192.0.2.10:9000/v1"}])
+    assert _defers(agent, config) is True
+
+
+def test_same_host_and_port_wins_over_same_host():
+    agent = _FakeAgent(provider="custom", base_url="http://192.0.2.10:8080/v1")
+    other_port_marked = _cfg({"a": {"base_url": "http://192.0.2.10:9000/v1", "max_in_flight_requests": 1},
+                              "b": {"base_url": "http://192.0.2.10:8080/v1", "max_in_flight_requests": 4}})
+    assert _defers(agent, other_port_marked) is False
+    this_port_marked = _cfg({"a": {"base_url": "http://192.0.2.10:9000/v1", "max_in_flight_requests": 4},
+                             "b": {"base_url": "http://192.0.2.10:8080/v1", "max_in_flight_requests": 1}})
+    assert _defers(agent, this_port_marked) is True
+
+
+def test_default_port_matches_an_explicit_one():
+    agent = _FakeAgent(provider="custom", base_url="http://192.0.2.10/v1")
+    config = _cfg({"a": {"base_url": "http://192.0.2.10:9000/v1", "max_in_flight_requests": 4},
+                   "b": {"base_url": "http://192.0.2.10:80/v1", "max_in_flight_requests": 1}})
+    assert _defers(agent, config) is True
+
+
+def test_url_under_api_or_url_is_read():
+    agent = _FakeAgent(provider="custom", base_url="http://192.0.2.10:8080/v1")
+    for field in ("api", "url"):
+        config = _cfg({"llamacpp": {field: "http://192.0.2.10:8080/v1", "max_in_flight_requests": 1}})
+        assert _defers(agent, config) is True, field
