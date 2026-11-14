@@ -7,7 +7,8 @@ the managed endpoint are therefore queued and dispatched when the machine is qui
 explicit /refine never defers). One slot per session, newest snapshot wins (a review replays
 the whole conversation, so coalescing is dedup, not loss); aged-out items (defer_max_age_s,
 default 30 min) dispatch regardless of idleness; in-memory best-effort like the immediate
-fork. Idle truth is the supervisor's /slots held for a settle window.
+fork. Idle truth is the supervisor's /slots held for a settle window (defer_idle_s, default
+15 s). Endpoints the operator marks single-stream (max_in_flight_requests: 1) defer the same way.
 """
 
 from __future__ import annotations
@@ -40,6 +41,17 @@ def defer_max_age_s(task_cfg: Optional[dict[str, Any]]) -> float:
     except (TypeError, ValueError):
         return _MAX_AGE_DEFAULT_S
     return value if value > 0 else _MAX_AGE_DEFAULT_S
+
+
+def defer_idle_s(task_cfg: Optional[dict[str, Any]]) -> float:
+    """Seconds the process must be free of live turns before a queued review dispatches
+    (``auxiliary.background_review.defer_idle_s``; default the settle window). A voice conversation
+    pauses for longer than the default between turns, so its profile can ask for a real break."""
+    try:
+        value = float((task_cfg or {}).get("defer_idle_s", _IDLE_SETTLE_S))
+    except (TypeError, ValueError):
+        return _IDLE_SETTLE_S
+    return value if value > 0 else _IDLE_SETTLE_S
 
 
 def review_targets_managed_local(agent: Any, task_cfg: Optional[dict[str, Any]]) -> bool:
@@ -210,7 +222,8 @@ class ReviewIdleQueue:
         return self.quiet_period()[0]
 
     def _pop_dispatchable(self) -> Optional[_PendingReview]:
-        """Oldest aged-out item, else the oldest item once quiet+idle hold."""
+        """Oldest aged-out item, else the oldest item once quiet+idle hold. The quiet window is the
+        oldest item's ``defer_idle_s``."""
         with self._lock:
             if not self._pending:
                 return None
@@ -218,7 +231,9 @@ class ReviewIdleQueue:
             aged = [p for p in self._pending.values()
                     if now - p.enqueued_at >= defer_max_age_s(p.kwargs.get("task_cfg"))]
             candidate = min(aged, key=lambda p: p.enqueued_at) if aged else None
-        if candidate is None and (self._quiet_for() < _IDLE_SETTLE_S or not self._server_idle()):
+            oldest = min(self._pending.values(), key=lambda p: p.enqueued_at)
+            window = defer_idle_s(oldest.kwargs.get("task_cfg"))
+        if candidate is None and (self._quiet_for() < window or not self._server_idle()):
             return None
         with self._lock:
             if candidate is None:
