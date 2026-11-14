@@ -170,3 +170,23 @@ def test_url_under_api_or_url_is_read():
     for field in ("api", "url"):
         config = _cfg({"llamacpp": {field: "http://192.0.2.10:8080/v1", "max_in_flight_requests": 1}})
         assert _defers(agent, config) is True, field
+
+
+def test_unmarked_entry_for_the_exact_endpoint_decides():
+    agent = _FakeAgent(provider="custom", base_url="http://192.0.2.10:8080/v1")
+    config = _cfg({"llm": {"base_url": "http://192.0.2.10:8080/v1"},
+                   "other": {"base_url": "http://192.0.2.10:9000/v1", "max_in_flight_requests": 1}})
+    assert _defers(agent, config) is False
+
+
+def test_first_marked_entry_on_the_exact_endpoint_decides():
+    agent = _FakeAgent(provider="custom", base_url="http://192.0.2.10:8080/v1")
+    config = _cfg({"plain": {"base_url": "http://192.0.2.10:8080/v1"}},
+                  [{"name": "llamacpp", "base_url": "http://192.0.2.10:8080/v1", "max_in_flight_requests": 1}])
+    assert _defers(agent, config) is True
+
+
+def test_same_host_fallback_when_no_entry_names_the_endpoint():
+    agent = _FakeAgent(provider="custom", base_url="http://192.0.2.10:8080/v1")
+    config = _cfg({"other": {"base_url": "http://192.0.2.10:9000/v1", "max_in_flight_requests": 1}})
+    assert _defers(agent, config) is True
